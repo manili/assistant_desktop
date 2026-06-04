@@ -16,12 +16,27 @@ import { TerminalConsole } from "./components/TerminalConsole";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { PromptPreviewModal } from "./components/PromptPreviewModal";
 
-// Local system instructions constant matching backend
-const SYSTEM_INSTRUCTIONS = `You are an advanced desktop AI coding agent with shell execution and code writing capabilities.
+const FACTORY_DEFAULT_PROMPT = `You are an advanced desktop AI coding agent with shell execution and code writing/patching capabilities.
 
 1. If you want to suggest executing a terminal command, wrap your command inside <execute_command>YOUR_SHELL_COMMAND</execute_command> tags.
 
-2. If you want to modify, edit, or write a code file inside the user's workspace, wrap your full code inside <write_file file_name="TARGET_FILENAME">YOUR_NEW_CODE</write_file> tags. Always supply the full file content inside the tag.
+2. If you want to modify, edit, or write a code file inside the user's workspace, you have two options:
+
+   A. [For minor edits / patching (Highly Optimized)]: If you are editing an existing file, propose a search-and-replace patch using the <patch_file file_name="TARGET_FILENAME"> tag containing one or more original/updated blocks:
+      <patch_file file_name="src/main.rs">
+      <<<<<<< SEARCH
+      fn main() {
+          println!("Hello, World!");
+      }
+      =======
+      fn main() {
+          println!("Hello, Agentic World!");
+      }
+      >>>>>>> REPLACE
+      </patch_file>
+      Make sure your SEARCH block matches the original file content exactly, including whitespace.
+
+   B. [For creating new files / full rewrites]: Propose a full file write using the <write_file file_name="TARGET_FILENAME">YOUR_NEW_CODE</write_file> tag. Always supply the full file content inside the tag.
 
 Your proposals will be securely intercepted, presented to the user, and will only execute upon explicit click authorization.`;
 
@@ -50,6 +65,9 @@ export default function App() {
   const [fetchingModels, setFetchingModels] = useState<{
     [key: string]: boolean;
   }>({});
+
+  // Global System Prompt state
+  const [systemInstruction, setSystemInstruction] = useState<string>("");
 
   // Prompt Debug Modal States
   const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false);
@@ -81,6 +99,7 @@ export default function App() {
     loadProviders();
     loadDefaultProvider();
     loadProxyRules();
+    loadSystemInstruction();
 
     const unlistenChat = listen<{ token: string }>("chat-token", (event) => {
       setMessages((prev) => {
@@ -139,6 +158,17 @@ export default function App() {
     } catch (err) {}
   };
 
+  const loadSystemInstruction = async () => {
+    try {
+      const saved = await invoke<string>("get_setting", {
+        key: "system_instruction",
+      });
+      setSystemInstruction(saved || FACTORY_DEFAULT_PROMPT);
+    } catch (err) {
+      setSystemInstruction(FACTORY_DEFAULT_PROMPT);
+    }
+  };
+
   const handleSaveProxyRules = async () => {
     try {
       await invoke("save_setting", {
@@ -148,6 +178,37 @@ export default function App() {
       alert("Proxy exceptions updated successfully.");
     } catch (err: any) {
       alert("Failed to save rules: " + err);
+    }
+  };
+
+  const handleSaveSystemInstruction = async () => {
+    try {
+      await invoke("save_setting", {
+        key: "system_instruction",
+        value: systemInstruction,
+      });
+      alert("Global system prompt updated successfully.");
+    } catch (err: any) {
+      alert("Failed to save system prompt: " + err);
+    }
+  };
+
+  const handleRestoreDefaultSystemInstruction = async () => {
+    if (
+      !confirm(
+        "Are you sure you want to restore the factory default prompt? This will revert any custom rules you've written."
+      )
+    )
+      return;
+    setSystemInstruction(FACTORY_DEFAULT_PROMPT);
+    try {
+      await invoke("save_setting", {
+        key: "system_instruction",
+        value: FACTORY_DEFAULT_PROMPT,
+      });
+      alert("Factory default prompt restored.");
+    } catch (err: any) {
+      alert("Failed to save system prompt: " + err);
     }
   };
 
@@ -438,6 +499,45 @@ ${result.stderr || "(no stderr)"}`;
     }
   };
 
+  // --- SUPERVISED FILE PATCHING INTERCEPTOR ---
+  const handlePatchFile = async (fileName: string, patchContent: string) => {
+    if (!workspacePath) {
+      alert("Please select a workspace folder first!");
+      return;
+    }
+
+    try {
+      const result = await invoke<string>("patch_workspace_file", {
+        rootPath: workspacePath,
+        fileName,
+        patchContent,
+      });
+
+      alert(result);
+      await refreshWorkspaceFiles(workspacePath);
+
+      // Reload active code viewer content if the file we just patched is open
+      if (activeFileName === fileName) {
+        const content = await invoke<string>("read_workspace_file", {
+          rootPath: workspacePath,
+          fileName,
+        });
+        setActiveFileContent(content);
+      }
+
+      handleSendMessage(
+        "System Feedback: Code patches were approved and successfully applied.",
+        "system"
+      );
+    } catch (err: any) {
+      alert("Failed to apply patch: " + err);
+      handleSendMessage(
+        `System Feedback: Failed to apply patch blocks to [${fileName}]: ${err}`,
+        "system"
+      );
+    }
+  };
+
   // --- CHAT INTERACTION HANDLERS ---
   const handleCopyMessage = async (content: string) => {
     try {
@@ -534,6 +634,7 @@ ${result.stderr || "(no stderr)"}`;
                 onRerun={handleRerunMessage}
                 onRunCommand={handleRunCommand}
                 onWriteFile={handleWriteFile}
+                onPatchFile={handlePatchFile}
                 // Preview Event Handler
                 onOpenPreview={handleOpenPreviewModal}
               />
@@ -567,6 +668,13 @@ ${result.stderr || "(no stderr)"}`;
             fetchingModels={fetchingModels}
             onFetchModels={handleFetchModels}
             onSelectModel={handleSelectModel}
+            // Global System Instructions Props
+            systemInstruction={systemInstruction}
+            setSystemInstruction={setSystemInstruction}
+            onSaveSystemInstruction={handleSaveSystemInstruction}
+            onRestoreDefaultSystemInstruction={
+              handleRestoreDefaultSystemInstruction
+            }
           />
         )}
       </main>
@@ -577,7 +685,7 @@ ${result.stderr || "(no stderr)"}`;
         onClose={() => setIsPreviewModalOpen(false)}
         endpoint={previewEndpoint}
         modelName={previewModel}
-        systemInstructions={SYSTEM_INSTRUCTIONS} // Forwards system constants down
+        systemInstructions={systemInstruction} // Forwards system constants down
         userPrompt={previewUserPrompt}
         onSend={handleSendFromPreview}
       />

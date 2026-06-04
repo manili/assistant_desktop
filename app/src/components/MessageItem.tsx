@@ -20,6 +20,7 @@ interface MessageItemProps {
   onRerun: (index: number) => void;
   onRunCommand: (command: string) => void;
   onWriteFile: (fileName: string, content: string) => void;
+  onPatchFile: (fileName: string, content: string) => void; // Added
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({
@@ -37,6 +38,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   onRerun,
   onRunCommand,
   onWriteFile,
+  onPatchFile, // Added
 }) => {
   const isEditing = editingIndex === index;
 
@@ -50,7 +52,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           : "bg-slate-800 border border-slate-700 mr-6"
       }`}
     >
-      {/* Floating Hover Actions [1] */}
+      {/* Floating Hover Actions */}
       {!isEditing && (
         <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex space-x-1 bg-slate-950/90 border border-slate-800 px-1.5 py-1 rounded shadow-lg z-10">
           <button
@@ -68,7 +70,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"
+                d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3"
               />
             </svg>
           </button>
@@ -197,7 +199,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                   </div>
                 </div>
               );
-            } else {
+            } else if (block.type === "write_file") {
               return (
                 <div
                   key={idx}
@@ -230,6 +232,44 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                       className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded transition-colors"
                     >
                       Approve & Write File
+                    </button>
+                  </div>
+                </div>
+              );
+            } else {
+              // patch_file
+              return (
+                <div
+                  key={idx}
+                  className="my-2 border border-emerald-900/50 bg-emerald-950/10 p-3 rounded-lg space-y-2"
+                >
+                  <div className="text-xs font-bold text-emerald-400 uppercase tracking-wide">
+                    Proposed Code Patching (Diff):{" "}
+                    <span className="font-mono text-slate-200">
+                      {block.fileName}
+                    </span>
+                  </div>
+                  <div className="border border-slate-850 rounded overflow-hidden max-h-48 overflow-y-auto">
+                    <CodeMirror
+                      value={block.content}
+                      height="100%"
+                      theme={oneDark}
+                      extensions={[javascript()]}
+                      readOnly
+                      className="text-xs font-mono"
+                    />
+                  </div>
+                  <div className="flex space-x-2 pt-1">
+                    <button
+                      onClick={() =>
+                        onPatchFile(
+                          block.fileName || "unnamed.txt",
+                          block.content
+                        )
+                      }
+                      className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded transition-colors"
+                    >
+                      Approve & Apply Patch
                     </button>
                   </div>
                 </div>

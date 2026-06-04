@@ -45,6 +45,7 @@ pub fn run() {
             workspace::list_files_in_workspace,
             workspace::read_workspace_file,
             workspace::write_workspace_file,
+            workspace::patch_workspace_file,
             chat::stream_chat,
             terminal::execute_terminal_command
         ])

@@ -25,6 +25,7 @@ interface ChatPanelProps {
   onRerun: (index: number) => void;
   onRunCommand: (command: string) => void;
   onWriteFile: (fileName: string, content: string) => void;
+  onPatchFile: (fileName: string, content: string) => void;
 
   // New preview hook trigger
   onOpenPreview: () => void;
@@ -51,6 +52,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onRerun,
   onRunCommand,
   onWriteFile,
+  onPatchFile,
   onOpenPreview,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -94,6 +96,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               onRerun={onRerun}
               onRunCommand={onRunCommand}
               onWriteFile={onWriteFile}
+              onPatchFile={onPatchFile}
             />
           ))
         )}

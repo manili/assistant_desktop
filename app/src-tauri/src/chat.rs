@@ -18,16 +18,24 @@ pub async fn stream_chat(
     prompt: String,
 ) -> Result<(), String> {
     
-    // 1. Fetch provider details & proxy bypass configurations from SQLite
-    let (provider_type, api_url, bypass_rules) = {
+    let (provider_type, api_url, bypass_rules, mut system_instructions) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let bypass = crate::db::get_bypass_rules(&db);
+
         let (pt, url) = db.query_row(
             "SELECT provider_type, api_url FROM providers WHERE id = ?1", 
             [&provider_id], 
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         ).map_err(|e| e.to_string())?;
-        (pt, url, bypass)
+
+        // Fetch transparent custom prompt
+        let sys_prompt: String = db.query_row(
+            "SELECT value FROM settings WHERE key = 'system_instruction'",
+            [],
+            |row| row.get(0)
+        ).unwrap_or_else(|_| "".to_string());
+
+        (pt, url, bypass, sys_prompt)
     };
 
     let api_key = get_api_key(&provider_id).unwrap_or_default();
@@ -36,15 +44,9 @@ pub async fn stream_chat(
         return Err(format!("An API Key is required to use {}.", provider_id));
     }
 
-    // 2. Fallback baseline system instructions
-    let mut system_instructions = "You are an advanced desktop AI coding agent with shell execution and code writing capabilities.\n\n\
-    1. If you want to suggest executing a terminal command, wrap your command inside `<execute_command>YOUR_SHELL_COMMAND</execute_command>` tags.\n\n\
-    2. If you want to modify, edit, or write a code file inside the user's workspace, wrap your full code inside `<write_file file_name=\"TARGET_FILENAME\">YOUR_NEW_CODE</write_file>` tags. Always supply the full file content inside the tag.\n\n\
-    Your proposals will be securely intercepted, presented to the user, and will only execute upon explicit click authorization.".to_string();
-
     let mut final_user_prompt = prompt.clone();
 
-    // 3. Dynamic payload separation: Check for full-debug preview tags and parse any edits
+    // Parse out user-edited payloads from the prompt inspector (if triggered)
     if prompt.contains("--- USER PROMPT ---") {
         let parts: Vec<&str> = prompt.split("--- USER PROMPT ---").collect();
         if parts.len() == 2 {
@@ -60,7 +62,11 @@ pub async fn stream_chat(
         }
     }
 
-    // 4. Fetch user-configured active model from SQLite, fallback to safety defaults if empty
+    // Fallback if system prompt in DB is completely empty
+    if system_instructions.trim().is_empty() {
+        system_instructions = "You are an expert software developer.".to_string();
+    }
+
     let active_model = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let setting_key = format!("active_model:{}", provider_id);
@@ -85,7 +91,6 @@ pub async fn stream_chat(
         }
     };
 
-    // 5. Configure the HTTP Client using the dynamic bypass list (Case-Insensitive)
     let mut builder = Client::builder();
     let api_url_lower = api_url.to_lowercase();
     let should_bypass = bypass_rules.iter().any(|rule| api_url_lower.contains(&rule.to_lowercase()));
@@ -94,7 +99,6 @@ pub async fn stream_chat(
     }
     let client = builder.build().unwrap_or_default();
 
-    // 6. Construct Provider-Specific Requests
     let req = match provider_type.as_str() {
         "anthropic" => {
             let body = serde_json::json!({
