@@ -1,0 +1,65 @@
+# ==========================
+# Toolchains
+# ==========================
+
+tools/
+activate.sh
+
+# ==========================
+# Node / React / Vite
+# ==========================
+
+app/node_modules/
+app/dist/
+app/.vite/
+app/.cache/
+
+# ==========================
+# Rust / Tauri
+# ==========================
+
+target/
+app/src-tauri/target/
+
+# Tauri updater signatures
+*.sig
+
+# ==========================
+# Environment files
+# ==========================
+
+.env
+.env.local
+.env.*.local
+
+# ==========================
+# Logs
+# ==========================
+
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================
+# IDEs
+# ==========================
+
+.vscode/
+.idea/
+
+# ==========================
+# macOS
+# ==========================
+
+.DS_Store
+
+# ==========================
+# Temporary files
+# ==========================
+
+*.tmp
+*.temp
+*.swp
+*.swo
