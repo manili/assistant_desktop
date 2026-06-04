@@ -37,3 +37,26 @@ pub fn init_db(db_path: PathBuf) -> Result<Connection, String> {
     
     Ok(conn)
 }
+
+/// Reads the user-specified proxy bypass rules from SQL, returning a list of matchable patterns.
+pub fn get_bypass_rules(conn: &Connection) -> Vec<String> {
+    let mut rules = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    
+    if let Ok(val) = conn.query_row(
+        "SELECT value FROM settings WHERE key = 'proxy_bypass_rules'",
+        [],
+        |row| row.get::<_, String>(0)
+    ) {
+        for rule in val.split_whitespace() {
+            let trimmed = rule.trim();
+            if !trimmed.is_empty() {
+                rules.push(trimmed.to_string());
+            }
+        }
+    }
+    rules
+}

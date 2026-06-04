@@ -21,7 +21,16 @@ pub fn run() {
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             let db_path = app_data.join("db.sqlite");
+            
+            println!("Initializing Local SQLite Database at: {:?}", db_path);
             let conn = db::init_db(db_path).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            
+            // Sync environment variables on startup
+            let bypass_rules = db::get_bypass_rules(&conn);
+            let comma_separated = bypass_rules.join(",");
+            std::env::set_var("NO_PROXY", &comma_separated);
+            std::env::set_var("no_proxy", &comma_separated);
+            
             app.manage(AppState { db: Mutex::new(conn) });
             Ok(())
         })
@@ -32,6 +41,7 @@ pub fn run() {
             commands::test_provider_connection,
             commands::save_setting,
             commands::get_setting,
+            commands::fetch_provider_models, // Registered
             workspace::list_files_in_workspace,
             workspace::read_workspace_file,
             workspace::write_workspace_file,

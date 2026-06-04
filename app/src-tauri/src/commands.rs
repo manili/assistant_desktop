@@ -64,9 +64,15 @@ pub async fn get_providers_status(state: State<'_, AppState>) -> Result<Vec<Prov
 
 #[tauri::command]
 pub async fn test_provider_connection(provider_id: String, state: State<'_, AppState>) -> Result<String, String> {
-    let (provider_type, api_url) = {
+    let (provider_type, api_url, bypass_rules) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.query_row("SELECT provider_type, api_url FROM providers WHERE id = ?1", [&provider_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|e| e.to_string())?
+        let rules = crate::db::get_bypass_rules(&db);
+        let (pt, url) = db.query_row(
+            "SELECT provider_type, api_url FROM providers WHERE id = ?1", 
+            [&provider_id], 
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        ).map_err(|e| e.to_string())?;
+        (pt, url, rules)
     };
     
     let api_key = get_api_key_helper(&provider_id, &state);
@@ -74,15 +80,27 @@ pub async fn test_provider_connection(provider_id: String, state: State<'_, AppS
         return Err("API Key is required".to_string());
     }
     
-    if provider_type == "anthropic" { test_anthropic_connection(&api_url, &api_key).await }
-    else if provider_type == "gemini" { test_gemini_connection(&api_url, &api_key).await }
-    else { test_openai_connection(&api_url, &api_key).await }
+    if provider_type == "anthropic" { 
+        test_anthropic_connection(&api_url, &api_key, &bypass_rules).await 
+    } else if provider_type == "gemini" { 
+        test_gemini_connection(&api_url, &api_key, &bypass_rules).await 
+    } else { 
+        test_openai_connection(&api_url, &api_key, &bypass_rules).await 
+    }
 }
 
 #[tauri::command]
 pub fn save_setting(key: String, value: String, state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)", [&key, &value]).map_err(|e| e.to_string())?;
+    
+    // Dynamically synchronize system environment variables if proxy bypass rules change!
+    if key == "proxy_bypass_rules" {
+        let bypass_rules = crate::db::get_bypass_rules(&db);
+        let comma_separated = bypass_rules.join(",");
+        std::env::set_var("NO_PROXY", &comma_separated);
+        std::env::set_var("no_proxy", &comma_separated);
+    }
     Ok(())
 }
 
@@ -91,4 +109,109 @@ pub fn get_setting(key: String, state: State<'_, AppState>) -> Result<String, St
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let val: Result<String, _> = db.query_row("SELECT value FROM settings WHERE key = ?1", [&key], |row| row.get(0));
     match val { Ok(v) => Ok(v), Err(_) => Ok("".to_string()) }
+}
+
+#[tauri::command]
+pub async fn fetch_provider_models(provider_id: String, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let (provider_type, api_url, bypass_rules) = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let rules = crate::db::get_bypass_rules(&db);
+        let (pt, url) = db.query_row(
+            "SELECT provider_type, api_url FROM providers WHERE id = ?1", 
+            [&provider_id], 
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        ).map_err(|e| e.to_string())?;
+        (pt, url, rules)
+    };
+
+    let api_key = get_api_key_helper(&provider_id, &state);
+    if provider_type != "openai" && provider_id != "ollama" && provider_id != "lmstudio" && api_key.is_empty() {
+        return Err("An API Key is required to list available models.".to_string());
+    }
+
+    // Set up client with bypass rules
+    let mut builder = reqwest::Client::builder();
+    let url_lower = api_url.to_lowercase();
+    let should_bypass = bypass_rules.iter().any(|rule| url_lower.contains(&rule.to_lowercase()));
+    if should_bypass {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build().unwrap_or_default();
+
+    let mut models = Vec::new();
+
+    match provider_type.as_str() {
+        "anthropic" => {
+            let url = format!("{}/models", api_url.trim_end_matches('/'));
+            let res = client.get(&url)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if !res.status().is_success() {
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!("Anthropic error: {}", text));
+            }
+
+            let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+            if let Some(arr) = json["data"].as_array() {
+                for m in arr {
+                    if let Some(id) = m["id"].as_str() {
+                        models.push(id.to_string());
+                    }
+                }
+            }
+        },
+        "gemini" => {
+            let url = format!("{}/models", api_url.trim_end_matches('/'));
+            let res = client.get(&url)
+                .header("x-goog-api-key", &api_key)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            if !res.status().is_success() {
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!("Gemini error: {}", text));
+            }
+
+            let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+            if let Some(arr) = json["models"].as_array() {
+                for m in arr {
+                    if let Some(name) = m["name"].as_str() {
+                        // Strip the "models/" prefix Google returns by default
+                        let clean_name = name.strip_prefix("models/").unwrap_or(name);
+                        models.push(clean_name.to_string());
+                    }
+                }
+            }
+        },
+        _ => { // openai, ollama, lmstudio
+            let url = format!("{}/models", api_url.trim_end_matches('/'));
+            let mut req = client.get(&url);
+            if !api_key.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key));
+            }
+            let res = req.send().await.map_err(|e| e.to_string())?;
+
+            if !res.status().is_success() {
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!("Provider error: {}", text));
+            }
+
+            let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+            if let Some(arr) = json["data"].as_array() {
+                for m in arr {
+                    if let Some(id) = m["id"].as_str() {
+                        models.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    models.sort();
+    Ok(models)
 }

@@ -18,63 +18,170 @@ pub async fn stream_chat(
     prompt: String,
 ) -> Result<(), String> {
     
-    let (provider_type, mut api_url) = {
+    // 1. Fetch provider details & proxy bypass configurations from SQLite
+    let (provider_type, api_url, bypass_rules) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        db.query_row(
+        let bypass = crate::db::get_bypass_rules(&db);
+        let (pt, url) = db.query_row(
             "SELECT provider_type, api_url FROM providers WHERE id = ?1", 
             [&provider_id], 
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        ).map_err(|e| e.to_string())?
+        ).map_err(|e| e.to_string())?;
+        (pt, url, bypass)
     };
 
     let api_key = get_api_key(&provider_id).unwrap_or_default();
     
-    if provider_type != "openai" && provider_id != "ollama" && provider_id != "lmstudio" {
-        return Err("Streaming is only implemented for OpenAI-compatible endpoints in Milestone 3.".to_string());
+    if provider_type != "openai" && provider_id != "ollama" && provider_id != "lmstudio" && api_key.is_empty() {
+        return Err(format!("An API Key is required to use {}.", provider_id));
     }
 
-    let model_name = if provider_id == "ollama" { "llama3" } else { "gpt-3.5-turbo" };
-    if !api_url.ends_with("/chat/completions") { api_url = format!("{}/chat/completions", api_url.trim_end_matches('/')); }
-
-    let system_instructions = "You are an advanced desktop AI coding agent with shell execution and code writing capabilities.\n\n\
+    // 2. Fallback baseline system instructions
+    let mut system_instructions = "You are an advanced desktop AI coding agent with shell execution and code writing capabilities.\n\n\
     1. If you want to suggest executing a terminal command, wrap your command inside `<execute_command>YOUR_SHELL_COMMAND</execute_command>` tags.\n\n\
     2. If you want to modify, edit, or write a code file inside the user's workspace, wrap your full code inside `<write_file file_name=\"TARGET_FILENAME\">YOUR_NEW_CODE</write_file>` tags. Always supply the full file content inside the tag.\n\n\
-    Your proposals will be securely intercepted, presented to the user, and will only execute upon explicit click authorization.";
+    Your proposals will be securely intercepted, presented to the user, and will only execute upon explicit click authorization.".to_string();
 
-    let body = serde_json::json!({
-        "model": model_name,
-        "stream": true,
-        "messages": [
-            {"role": "system", "content": system_instructions},
-            {"role": "user", "content": prompt}
-        ]
-    });
+    let mut final_user_prompt = prompt.clone();
 
+    // 3. Dynamic payload separation: Check for full-debug preview tags and parse any edits
+    if prompt.contains("--- USER PROMPT ---") {
+        let parts: Vec<&str> = prompt.split("--- USER PROMPT ---").collect();
+        if parts.len() == 2 {
+            let system_part = parts[0]
+                .trim_start_matches("--- SYSTEM INSTRUCTIONS ---")
+                .trim();
+            let user_part = parts[1].trim();
+            
+            if !system_part.is_empty() {
+                system_instructions = system_part.to_string();
+            }
+            final_user_prompt = user_part.to_string();
+        }
+    }
+
+    // 4. Fetch user-configured active model from SQLite, fallback to safety defaults if empty
+    let active_model = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        let setting_key = format!("active_model:{}", provider_id);
+        let val: Result<String, _> = db.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [&setting_key],
+            |row| row.get(0)
+        );
+        match val {
+            Ok(model) if !model.trim().is_empty() => model,
+            _ => {
+                if provider_type == "anthropic" {
+                    "claude-3-5-sonnet-20241022".to_string()
+                } else if provider_type == "gemini" {
+                    "gemini-1.5-pro".to_string()
+                } else if provider_id == "ollama" {
+                    "llama3".to_string()
+                } else {
+                    "gpt-4o".to_string()
+                }
+            }
+        }
+    };
+
+    // 5. Configure the HTTP Client using the dynamic bypass list (Case-Insensitive)
     let mut builder = Client::builder();
-    if api_url.contains("localhost") || api_url.contains("127.0.0.1") || api_url.contains("192.168") {
+    let api_url_lower = api_url.to_lowercase();
+    let should_bypass = bypass_rules.iter().any(|rule| api_url_lower.contains(&rule.to_lowercase()));
+    if should_bypass {
         builder = builder.no_proxy();
     }
-    
     let client = builder.build().unwrap_or_default();
-    let mut req = client.post(&api_url).json(&body);
-    if !api_key.is_empty() { req = req.header("Authorization", format!("Bearer {}", api_key)); }
 
-    let res = req.send().await.map_err(|e| e.to_string())?;
-    if !res.status().is_success() { return Err(format!("API Error: {}", res.status())); }
+    // 6. Construct Provider-Specific Requests
+    let req = match provider_type.as_str() {
+        "anthropic" => {
+            let body = serde_json::json!({
+                "model": active_model,
+                "max_tokens": 4096,
+                "stream": true,
+                "system": system_instructions,
+                "messages": [{"role": "user", "content": final_user_prompt}]
+            });
+            client.post(format!("{}/messages", api_url.trim_end_matches('/')))
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+        },
+        "gemini" => {
+            let body = serde_json::json!({
+                "systemInstruction": {
+                    "parts": [{"text": system_instructions}]
+                },
+                "contents": [{"role": "user", "parts": [{"text": final_user_prompt}]}]
+            });
+            let url = format!("{}/models/{}:streamGenerateContent?alt=sse", api_url.trim_end_matches('/'), active_model);
+            client.post(url)
+                .header("x-goog-api-key", api_key)
+                .json(&body)
+        },
+        _ => { // openai, ollama, lmstudio
+            let url = if !api_url.ends_with("/chat/completions") {
+                format!("{}/chat/completions", api_url.trim_end_matches('/'))
+            } else {
+                api_url.clone()
+            };
+            
+            let body = serde_json::json!({
+                "model": active_model,
+                "stream": true,
+                "messages": [
+                    {"role": "system", "content": system_instructions},
+                    {"role": "user", "content": final_user_prompt}
+                ]
+            });
+            
+            let mut r = client.post(url).json(&body);
+            if !api_key.is_empty() {
+                r = r.header("Authorization", format!("Bearer {}", api_key));
+            }
+            r
+        }
+    };
+
+    let res = req.send().await.map_err(|e| format!("Network request failed: {}", e))?;
+    if !res.status().is_success() { 
+        let status = res.status();
+        let err_text = res.text().await.unwrap_or_default();
+        return Err(format!("API Error [{}]: {}", status, err_text)); 
+    }
 
     let mut stream = res.bytes_stream();
 
     while let Some(chunk_result) = stream.next().await {
         if let Ok(bytes) = chunk_result {
             let chunk_str = String::from_utf8_lossy(&bytes);
+            
             for line in chunk_str.lines() {
                 if line.starts_with("data: ") {
                     let data = line.trim_start_matches("data: ").trim();
                     if data == "[DONE]" { continue; }
                     
                     if let Ok(json) = serde_json::from_str::<Value>(data) {
-                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                            let _ = app.emit("chat-token", ChatTokenPayload { token: content.to_string() });
+                        let mut token_str = String::new();
+
+                        if provider_type == "anthropic" {
+                            if let Some(text) = json["delta"]["text"].as_str() {
+                                token_str = text.to_string();
+                            }
+                        } else if provider_type == "gemini" {
+                            if let Some(text) = json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+                                token_str = text.to_string();
+                            }
+                        } else {
+                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                token_str = content.to_string();
+                            }
+                        }
+
+                        if !token_str.is_empty() {
+                            let _ = app.emit("chat-token", ChatTokenPayload { token: token_str });
                         }
                     }
                 }

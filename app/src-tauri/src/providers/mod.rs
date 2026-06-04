@@ -12,9 +12,13 @@ pub struct ProviderStatus {
     pub is_local_online: bool,
 }
 
-fn get_client_for_url(url: &str) -> Client {
+fn get_client_for_url(url: &str, bypass_rules: &[String]) -> Client {
     let mut builder = Client::builder();
-    if url.contains("localhost") || url.contains("127.0.0.1") || url.contains("192.168") || url.contains("::1") {
+    let url_lower = url.to_lowercase();
+    
+    // Case-insensitive evaluation of bypass rules
+    let should_bypass = bypass_rules.iter().any(|rule| url_lower.contains(&rule.to_lowercase()));
+    if should_bypass {
         builder = builder.no_proxy(); 
     }
     builder.build().unwrap_or_else(|_| Client::new())
@@ -29,8 +33,8 @@ pub async fn ping_url(url: &str) -> bool {
     }
 }
 
-pub async fn test_anthropic_connection(api_url: &str, api_key: &str) -> Result<String, String> {
-    let client = get_client_for_url(api_url);
+pub async fn test_anthropic_connection(api_url: &str, api_key: &str, bypass_rules: &[String]) -> Result<String, String> {
+    let client = get_client_for_url(api_url, bypass_rules);
     let body = serde_json::json!({
         "model": "claude-3-haiku-20240307",
         "max_tokens": 1,
@@ -55,8 +59,8 @@ pub async fn test_anthropic_connection(api_url: &str, api_key: &str) -> Result<S
     }
 }
 
-pub async fn test_openai_connection(api_url: &str, api_key: &str) -> Result<String, String> {
-    let client = get_client_for_url(api_url);
+pub async fn test_openai_connection(api_url: &str, api_key: &str, bypass_rules: &[String]) -> Result<String, String> {
+    let client = get_client_for_url(api_url, bypass_rules);
     let mut req = client.get(format!("{}/models", api_url));
     if !api_key.is_empty() { req = req.header("Authorization", format!("Bearer {}", api_key)); }
     let res = req.send().await.map_err(|e| e.to_string())?;
@@ -70,8 +74,8 @@ pub async fn test_openai_connection(api_url: &str, api_key: &str) -> Result<Stri
     }
 }
 
-pub async fn test_gemini_connection(api_url: &str, api_key: &str) -> Result<String, String> {
-    let client = get_client_for_url(api_url);
+pub async fn test_gemini_connection(api_url: &str, api_key: &str, bypass_rules: &[String]) -> Result<String, String> {
+    let client = get_client_for_url(api_url, bypass_rules);
     let res = client.get(format!("{}/models", api_url))
         .header("x-goog-api-key", api_key)
         .send()
