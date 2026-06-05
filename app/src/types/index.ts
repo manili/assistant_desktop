@@ -11,3 +11,8 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
 }
+
+export interface EditorTab {
+  fileName: string;
+  content: string;
+}

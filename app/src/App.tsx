@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 // Shared Types
-import { ProviderStatus, ChatMessage } from "./types";
+import { ProviderStatus, ChatMessage, EditorTab } from "./types";
 
 // Submodules
 import { Header } from "./components/Header";
@@ -75,11 +75,16 @@ export default function App() {
   const [previewModel, setPreviewModel] = useState("");
   const [previewUserPrompt, setPreviewUserPrompt] = useState("");
 
-  // Workspace State
+  // Workspace & Multi-Tab Editor State
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [files, setFiles] = useState<string[]>([]);
-  const [activeFileContent, setActiveFileContent] = useState<string>("");
-  const [activeFileName, setActiveFileName] = useState<string>("");
+  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
+  const [activeTabName, setActiveTabName] = useState<string>("");
+
+  // Checkbox Selection State
+  const [selectedPaths, setSelectedPaths] = useState<{
+    [path: string]: boolean;
+  }>({});
 
   // Chat State
   const [prompt, setPrompt] = useState("");
@@ -310,7 +315,7 @@ export default function App() {
     await invoke("save_setting", { key: "default_provider", value: id });
   };
 
-  // --- DIRECTORY & FILE CONTROLS ---
+  // --- MULTI-TAB DIRECTORY & FILE CONTROLS ---
   const refreshWorkspaceFiles = async (root: string) => {
     try {
       const fileList = await invoke<string[]>("list_files_in_workspace", {
@@ -327,6 +332,9 @@ export default function App() {
       const selected = await open({ directory: true, multiple: false });
       if (selected && typeof selected === "string") {
         setWorkspacePath(selected);
+        setEditorTabs([]);
+        setActiveTabName("");
+        setSelectedPaths({});
         refreshWorkspaceFiles(selected);
       }
     } catch (err) {
@@ -336,16 +344,75 @@ export default function App() {
 
   const handleOpenFile = async (fileName: string) => {
     if (!workspacePath) return;
+
+    // Check if the file is already open in a tab
+    const alreadyOpen = editorTabs.some((t) => t.fileName === fileName);
+    if (alreadyOpen) {
+      setActiveTabName(fileName);
+      return;
+    }
+
     try {
       const content = await invoke<string>("read_workspace_file", {
         rootPath: workspacePath,
         fileName,
       });
-      setActiveFileName(fileName);
-      setActiveFileContent(content);
+      setEditorTabs((prev) => [...prev, { fileName, content }]);
+      setActiveTabName(fileName);
     } catch (err) {
       alert("Failed to open file: " + err);
     }
+  };
+
+  const handleCloseTab = (fileName: string) => {
+    const updatedTabs = editorTabs.filter((t) => t.fileName !== fileName);
+    setEditorTabs(updatedTabs);
+
+    if (activeTabName === fileName) {
+      if (updatedTabs.length > 0) {
+        setActiveTabName(updatedTabs[updatedTabs.length - 1].fileName);
+      } else {
+        setActiveTabName("");
+      }
+    }
+  };
+
+  const handleSelectTab = (fileName: string) => {
+    setActiveTabName(fileName);
+  };
+
+  // --- RECURSIVE CHECKBOX TOGGLE HANDLER ---
+  const handleToggleCheckbox = (
+    path: string,
+    type: "file" | "directory",
+    checked: boolean
+  ) => {
+    setSelectedPaths((prev) => {
+      const next = { ...prev };
+      next[path] = checked;
+
+      if (type === "directory") {
+        const prefix = `${path}/`;
+
+        // 1. Cascade checks down to all subfiles matching this directory prefix
+        files.forEach((f) => {
+          if (f === path || f.startsWith(prefix)) {
+            next[f] = checked;
+          }
+
+          // 2. Dynamically extract and cascade checks to subdirectories on-the-fly
+          const parts = f.split("/");
+          let current = "";
+          for (let i = 0; i < parts.length - 1; i++) {
+            current = current ? `${current}/${parts[i]}` : parts[i];
+            if (current === path || current.startsWith(prefix)) {
+              next[current] = checked;
+            }
+          }
+        });
+      }
+      return next;
+    });
   };
 
   // --- STREAMING PIPELINE TRIGGER ---
@@ -356,7 +423,6 @@ export default function App() {
     const textToSend = customPrompt || prompt;
     if (!textToSend.trim() || !selectedProvider) return;
 
-    // Push prompt to messages log
     setMessages((prev) => [...prev, { role, content: textToSend }]);
 
     if (!customPrompt) {
@@ -367,8 +433,23 @@ export default function App() {
 
     try {
       let finalPrompt = textToSend;
-      if (activeFileName && !customPrompt) {
-        finalPrompt = `Context from active editor file '${activeFileName}':\n\`\`\`\n${activeFileContent}\n\`\`\`\n\nUser Message: ${textToSend}`;
+
+      // OPTIMIZATION: Filter paths to compile only files checked by the user
+      const selectedFilePaths = files.filter((f) => !!selectedPaths[f]);
+
+      if (selectedFilePaths.length > 0 && !customPrompt) {
+        try {
+          const contextBlock = await invoke<string>(
+            "compile_selected_files_prompt",
+            {
+              rootPath: workspacePath,
+              selectedFiles: selectedFilePaths,
+            }
+          );
+          finalPrompt = `${contextBlock}\nUser Message: ${textToSend}`;
+        } catch (err) {
+          console.error("Failed to compile selected files context: ", err);
+        }
       }
 
       await invoke("stream_chat", {
@@ -386,7 +467,7 @@ export default function App() {
   };
 
   // --- PREVIEW MODAL LOGIC ---
-  const handleOpenPreviewModal = () => {
+  const handleOpenPreviewModal = async () => {
     if (!selectedProvider) {
       alert("Please select an active provider first!");
       return;
@@ -396,8 +477,21 @@ export default function App() {
     const modelName = selectedModels[selectedProvider] || "Default fallback";
 
     let finalPrompt = prompt;
-    if (activeFileName) {
-      finalPrompt = `Context from active editor file '${activeFileName}':\n\`\`\`\n${activeFileContent}\n\`\`\`\n\nUser Message: ${prompt}`;
+    const selectedFilePaths = files.filter((f) => !!selectedPaths[f]);
+
+    if (selectedFilePaths.length > 0) {
+      try {
+        const contextBlock = await invoke<string>(
+          "compile_selected_files_prompt",
+          {
+            rootPath: workspacePath,
+            selectedFiles: selectedFilePaths,
+          }
+        );
+        finalPrompt = `${contextBlock}\nUser Message: ${prompt}`;
+      } catch (err) {
+        console.error("Failed to compile preview context: ", err);
+      }
     }
 
     setPreviewEndpoint(endpoint);
@@ -408,8 +502,7 @@ export default function App() {
 
   const handleSendFromPreview = async (combinedPayload: string) => {
     setIsPreviewModalOpen(false);
-    setPrompt(""); // Clear original text box
-    // Dispatch the combined layout which Rust will split
+    setPrompt("");
     await handleSendMessage(combinedPayload, "user");
   };
 
@@ -482,9 +575,10 @@ ${result.stderr || "(no stderr)"}`;
       alert(result);
       await refreshWorkspaceFiles(workspacePath);
 
-      if (activeFileName === fileName) {
-        setActiveFileContent(content);
-      }
+      // Hot-reload CodeMirror and active tab state if edited file is open
+      setEditorTabs((prev) =>
+        prev.map((t) => (t.fileName === fileName ? { ...t, content } : t))
+      );
 
       handleSendMessage(
         "System Feedback: Code modifications were approved and successfully written.",
@@ -516,14 +610,14 @@ ${result.stderr || "(no stderr)"}`;
       alert(result);
       await refreshWorkspaceFiles(workspacePath);
 
-      // Reload active code viewer content if the file we just patched is open
-      if (activeFileName === fileName) {
-        const content = await invoke<string>("read_workspace_file", {
-          rootPath: workspacePath,
-          fileName,
-        });
-        setActiveFileContent(content);
-      }
+      // Fetch newly patched content to hot-reload target editor tab
+      const content = await invoke<string>("read_workspace_file", {
+        rootPath: workspacePath,
+        fileName,
+      });
+      setEditorTabs((prev) =>
+        prev.map((t) => (t.fileName === fileName ? { ...t, content } : t))
+      );
 
       handleSendMessage(
         "System Feedback: Code patches were approved and successfully applied.",
@@ -602,14 +696,18 @@ ${result.stderr || "(no stderr)"}`;
               <WorkspaceSidebar
                 workspacePath={workspacePath}
                 files={files}
-                activeFileName={activeFileName}
+                activeFileName={activeTabName}
+                selectedPaths={selectedPaths}
+                onToggleCheckbox={handleToggleCheckbox}
                 onSelectWorkspace={handleSelectWorkspace}
                 onOpenFile={handleOpenFile}
               />
 
               <CodeViewer
-                activeFileName={activeFileName}
-                activeFileContent={activeFileContent}
+                tabs={editorTabs}
+                activeTabName={activeTabName}
+                onSelectTab={handleSelectTab}
+                onCloseTab={handleCloseTab}
               />
 
               <ChatPanel
@@ -685,7 +783,7 @@ ${result.stderr || "(no stderr)"}`;
         onClose={() => setIsPreviewModalOpen(false)}
         endpoint={previewEndpoint}
         modelName={previewModel}
-        systemInstructions={systemInstruction} // Forwards system constants down
+        systemInstructions={systemInstruction}
         userPrompt={previewUserPrompt}
         onSend={handleSendFromPreview}
       />

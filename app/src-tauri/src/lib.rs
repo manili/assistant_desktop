@@ -41,11 +41,12 @@ pub fn run() {
             commands::test_provider_connection,
             commands::save_setting,
             commands::get_setting,
-            commands::fetch_provider_models, // Registered
+            commands::fetch_provider_models,
             workspace::list_files_in_workspace,
             workspace::read_workspace_file,
             workspace::write_workspace_file,
             workspace::patch_workspace_file,
+            workspace::compile_selected_files_prompt,
             chat::stream_chat,
             terminal::execute_terminal_command
         ])

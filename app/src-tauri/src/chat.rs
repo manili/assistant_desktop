@@ -21,14 +21,13 @@ pub async fn stream_chat(
     let (provider_type, api_url, bypass_rules, mut system_instructions) = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
         let bypass = crate::db::get_bypass_rules(&db);
-
+        
         let (pt, url) = db.query_row(
             "SELECT provider_type, api_url FROM providers WHERE id = ?1", 
             [&provider_id], 
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         ).map_err(|e| e.to_string())?;
 
-        // Fetch transparent custom prompt
         let sys_prompt: String = db.query_row(
             "SELECT value FROM settings WHERE key = 'system_instruction'",
             [],
@@ -46,7 +45,6 @@ pub async fn stream_chat(
 
     let mut final_user_prompt = prompt.clone();
 
-    // Parse out user-edited payloads from the prompt inspector (if triggered)
     if prompt.contains("--- USER PROMPT ---") {
         let parts: Vec<&str> = prompt.split("--- USER PROMPT ---").collect();
         if parts.len() == 2 {
@@ -55,14 +53,11 @@ pub async fn stream_chat(
                 .trim();
             let user_part = parts[1].trim();
             
-            if !system_part.is_empty() {
-                system_instructions = system_part.to_string();
-            }
+            if !system_part.is_empty() { system_instructions = system_part.to_string(); }
             final_user_prompt = user_part.to_string();
         }
     }
 
-    // Fallback if system prompt in DB is completely empty
     if system_instructions.trim().is_empty() {
         system_instructions = "You are an expert software developer.".to_string();
     }
@@ -78,15 +73,10 @@ pub async fn stream_chat(
         match val {
             Ok(model) if !model.trim().is_empty() => model,
             _ => {
-                if provider_type == "anthropic" {
-                    "claude-3-5-sonnet-20241022".to_string()
-                } else if provider_type == "gemini" {
-                    "gemini-1.5-pro".to_string()
-                } else if provider_id == "ollama" {
-                    "llama3".to_string()
-                } else {
-                    "gpt-4o".to_string()
-                }
+                if provider_type == "anthropic" { "claude-3-5-sonnet-20241022".to_string() }
+                else if provider_type == "gemini" { "gemini-1.5-pro".to_string() }
+                else if provider_id == "ollama" { "llama3".to_string() }
+                else { "gpt-4o".to_string() }
             }
         }
     };
@@ -94,9 +84,7 @@ pub async fn stream_chat(
     let mut builder = Client::builder();
     let api_url_lower = api_url.to_lowercase();
     let should_bypass = bypass_rules.iter().any(|rule| api_url_lower.contains(&rule.to_lowercase()));
-    if should_bypass {
-        builder = builder.no_proxy();
-    }
+    if should_bypass { builder = builder.no_proxy(); }
     let client = builder.build().unwrap_or_default();
 
     let req = match provider_type.as_str() {
@@ -115,15 +103,11 @@ pub async fn stream_chat(
         },
         "gemini" => {
             let body = serde_json::json!({
-                "systemInstruction": {
-                    "parts": [{"text": system_instructions}]
-                },
+                "systemInstruction": { "parts": [{"text": system_instructions}] },
                 "contents": [{"role": "user", "parts": [{"text": final_user_prompt}]}]
             });
             let url = format!("{}/models/{}:streamGenerateContent?alt=sse", api_url.trim_end_matches('/'), active_model);
-            client.post(url)
-                .header("x-goog-api-key", api_key)
-                .json(&body)
+            client.post(url).header("x-goog-api-key", api_key).json(&body)
         },
         _ => { // openai, ollama, lmstudio
             let url = if !api_url.ends_with("/chat/completions") {
@@ -142,9 +126,7 @@ pub async fn stream_chat(
             });
             
             let mut r = client.post(url).json(&body);
-            if !api_key.is_empty() {
-                r = r.header("Authorization", format!("Bearer {}", api_key));
-            }
+            if !api_key.is_empty() { r = r.header("Authorization", format!("Bearer {}", api_key)); }
             r
         }
     };
@@ -171,9 +153,7 @@ pub async fn stream_chat(
                         let mut token_str = String::new();
 
                         if provider_type == "anthropic" {
-                            if let Some(text) = json["delta"]["text"].as_str() {
-                                token_str = text.to_string();
-                            }
+                            if let Some(text) = json["delta"]["text"].as_str() { token_str = text.to_string(); }
                         } else if provider_type == "gemini" {
                             if let Some(text) = json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
                                 token_str = text.to_string();

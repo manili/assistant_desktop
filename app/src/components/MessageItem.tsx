@@ -20,7 +20,7 @@ interface MessageItemProps {
   onRerun: (index: number) => void;
   onRunCommand: (command: string) => void;
   onWriteFile: (fileName: string, content: string) => void;
-  onPatchFile: (fileName: string, content: string) => void; // Added
+  onPatchFile: (fileName: string, content: string) => void;
 }
 
 export const MessageItem: React.FC<MessageItemProps> = ({
@@ -38,7 +38,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   onRerun,
   onRunCommand,
   onWriteFile,
-  onPatchFile, // Added
+  onPatchFile,
 }) => {
   const isEditing = editingIndex === index;
 
@@ -52,7 +52,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
           : "bg-slate-800 border border-slate-700 mr-6"
       }`}
     >
-      {/* Floating Hover Actions */}
       {!isEditing && (
         <div className="absolute right-2 top-2 opacity-0 group-hover:opacity-100 transition-opacity flex space-x-1 bg-slate-950/90 border border-slate-800 px-1.5 py-1 rounded shadow-lg z-10">
           <button
@@ -237,7 +236,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                 </div>
               );
             } else {
-              // patch_file
               return (
                 <div
                   key={idx}
