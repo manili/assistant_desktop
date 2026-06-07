@@ -47,6 +47,14 @@ pub fn run() {
             workspace::write_workspace_file,
             workspace::patch_workspace_file,
             workspace::compile_selected_files_prompt,
+            workspace::load_or_create_workspace,
+            workspace::sync_workspace_tabs,
+            workspace::sync_workspace_selected_files,
+            workspace::save_workspace_message,
+            workspace::update_message_selection,
+            workspace::clear_workspace_messages,
+            workspace::delete_workspace_message,
+            workspace::update_workspace_message_content,
             chat::stream_chat,
             terminal::execute_terminal_command
         ])

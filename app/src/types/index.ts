@@ -8,11 +8,14 @@ export interface ProviderStatus {
 }
 
 export interface ChatMessage {
+  id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  isSelected?: boolean;
 }
 
 export interface EditorTab {
   fileName: string;
   content: string;
+  isDirty?: boolean;
 }

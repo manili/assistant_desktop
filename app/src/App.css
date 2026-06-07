@@ -6,3 +6,11 @@ body {
   background-color: #020617;
   color: #f1f5f9;
 }
+
+/* Safari / WebKit Focus and CodeMirror Text Selection Override */
+[contenteditable],
+input,
+textarea {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}

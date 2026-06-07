@@ -1,5 +1,5 @@
 import "./App.css";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -75,13 +75,12 @@ export default function App() {
   const [previewModel, setPreviewModel] = useState("");
   const [previewUserPrompt, setPreviewUserPrompt] = useState("");
 
-  // Workspace & Multi-Tab Editor State
+  // Persistent Workspace & Layout State
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   const [files, setFiles] = useState<string[]>([]);
   const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
   const [activeTabName, setActiveTabName] = useState<string>("");
-
-  // Checkbox Selection State
   const [selectedPaths, setSelectedPaths] = useState<{
     [path: string]: boolean;
   }>({});
@@ -90,6 +89,11 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+
+  // Active Streaming Message Target Pointer (In-Place Streaming Redirection)
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
+    null
+  );
 
   // Message Interactive Actions State
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -100,6 +104,21 @@ export default function App() {
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [runningCommand, setRunningCommand] = useState<string | null>(null);
 
+  // Layout Resizer States
+  const [sidebarWidth, setSidebarWidth] = useState(240); // px
+  const [chatWidth, setChatWidth] = useState(384); // px
+  const [terminalHeight, setTerminalHeight] = useState(192); // px
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const terminalEndRef = useRef<HTMLDivElement>(null);
+
+  // Use a mutable ref to hold the current streaming message ID.
+  // This allows our useEffect listener (which is registered once on mount) to always access the latest ID.
+  const streamingMsgIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    streamingMsgIdRef.current = streamingMessageId;
+  }, [streamingMessageId]);
+
   useEffect(() => {
     loadProviders();
     loadDefaultProvider();
@@ -108,13 +127,26 @@ export default function App() {
 
     const unlistenChat = listen<{ token: string }>("chat-token", (event) => {
       setMessages((prev) => {
-        const newMessages = [...prev];
-        const lastMsg = newMessages[newMessages.length - 1];
-        if (lastMsg && lastMsg.role === "assistant") {
-          lastMsg.content += event.payload.token;
-        } else {
-          newMessages.push({ role: "assistant", content: event.payload.token });
-        }
+        const currentStreamingId = streamingMsgIdRef.current;
+        if (!currentStreamingId) return prev;
+
+        const newMessages = prev.map((msg) => {
+          if (msg.id === currentStreamingId) {
+            const updatedContent = msg.content + event.payload.token;
+            // Dynamically save the growing token stream content to SQLite in real-time
+            if (workspaceId) {
+              invoke("save_workspace_message", {
+                workspaceId,
+                messageId: msg.id,
+                role: msg.role,
+                content: updatedContent,
+                isSelected: msg.isSelected !== false,
+              }).catch(console.error);
+            }
+            return { ...msg, content: updatedContent };
+          }
+          return msg;
+        });
         return newMessages;
       });
     });
@@ -132,7 +164,70 @@ export default function App() {
       unlistenStdout.then((f) => f());
       unlistenStderr.then((f) => f());
     };
-  }, []);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    if (isTerminalOpen) {
+      terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [terminalLogs, isTerminalOpen]);
+
+  // --- LAYOUT DRAG RESIZERS ---
+  const handleSidebarResize = (mouseDownEvent: React.MouseEvent) => {
+    mouseDownEvent.preventDefault();
+    const startX = mouseDownEvent.clientX;
+    const startWidth = sidebarWidth;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      setSidebarWidth(Math.max(160, Math.min(480, startWidth + deltaX)));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
+
+  const handleChatResize = (mouseDownEvent: React.MouseEvent) => {
+    mouseDownEvent.preventDefault();
+    const startX = mouseDownEvent.clientX;
+    const startWidth = chatWidth;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      // Inverted offset delta because sidebar drags leftwards to increase scale
+      const deltaX = startX - moveEvent.clientX;
+      setChatWidth(Math.max(240, Math.min(600, startWidth + deltaX)));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
+
+  const handleTerminalResize = (mouseDownEvent: React.MouseEvent) => {
+    mouseDownEvent.preventDefault();
+    const startY = mouseDownEvent.clientY;
+    const startHeight = terminalHeight;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const deltaY = startY - moveEvent.clientY;
+      setTerminalHeight(Math.max(80, Math.min(400, startHeight + deltaY)));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
 
   // --- SETTINGS CONTROLS ---
   const loadProviders = async () => {
@@ -199,11 +294,7 @@ export default function App() {
   };
 
   const handleRestoreDefaultSystemInstruction = async () => {
-    if (
-      !confirm(
-        "Are you sure you want to restore the factory default prompt? This will revert any custom rules you've written."
-      )
-    )
+    if (!confirm("Revert any custom rules and restore factory default prompt?"))
       return;
     setSystemInstruction(FACTORY_DEFAULT_PROMPT);
     try {
@@ -224,9 +315,7 @@ export default function App() {
         const saved = await invoke<string>("get_setting", {
           key: `active_model:${p.id}`,
         });
-        if (saved) {
-          modelsMap[p.id] = saved;
-        }
+        if (saved) modelsMap[p.id] = saved;
       } catch (err) {}
     }
     setSelectedModels(modelsMap);
@@ -243,7 +332,7 @@ export default function App() {
         handleSelectModel(providerId, modelsList[0]);
       }
     } catch (err: any) {
-      alert("Failed to fetch available models from provider: " + err);
+      alert("Failed to fetch available models: " + err);
     } finally {
       setFetchingModels((prev) => ({ ...prev, [providerId]: false }));
     }
@@ -257,7 +346,7 @@ export default function App() {
         value: modelName,
       });
     } catch (err: any) {
-      alert("Failed to save target model configuration: " + err);
+      alert("Failed to save model: " + err);
     }
   };
 
@@ -315,7 +404,51 @@ export default function App() {
     await invoke("save_setting", { key: "default_provider", value: id });
   };
 
-  // --- MULTI-TAB DIRECTORY & FILE CONTROLS ---
+  // --- SQL WORKSPACE CONTROLLER BOOTSTRAPPER ---
+  const handleSelectWorkspace = async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (selected && typeof selected === "string") {
+        setWorkspacePath(selected);
+
+        // 1. Fetch or initialize the target workspace entry in SQL database
+        const ws: any = await invoke("load_or_create_workspace", {
+          rootPath: selected,
+        });
+        setWorkspaceId(ws.id);
+
+        // 2. Parse opened tabs
+        const parsedTabs: EditorTab[] = [];
+        for (const tabFile of ws.tabs) {
+          try {
+            const content = await invoke<string>("read_workspace_file", {
+              rootPath: selected,
+              fileName: tabFile,
+            });
+            parsedTabs.push({ fileName: tabFile, content, isDirty: false });
+          } catch (err) {}
+        }
+        setEditorTabs(parsedTabs);
+        setActiveTabName(ws.active_tab || "");
+
+        // 3. Populate selected directories list
+        const fileSelMap: { [path: string]: boolean } = {};
+        ws.selected_files.forEach((f: string) => {
+          fileSelMap[f] = true;
+        });
+        setSelectedPaths(fileSelMap);
+
+        // 4. Populate historical message thread
+        setMessages(ws.messages);
+
+        // 5. Populate disk structure tree
+        await refreshWorkspaceFiles(selected);
+      }
+    } catch (err) {
+      alert("Failed to open workspace directory: " + err);
+    }
+  };
+
   const refreshWorkspaceFiles = async (root: string) => {
     try {
       const fileList = await invoke<string[]>("list_files_in_workspace", {
@@ -323,32 +456,21 @@ export default function App() {
       });
       setFiles(fileList);
     } catch (err) {
-      console.error("Failed to refresh file structures: ", err);
-    }
-  };
-
-  const handleSelectWorkspace = async () => {
-    try {
-      const selected = await open({ directory: true, multiple: false });
-      if (selected && typeof selected === "string") {
-        setWorkspacePath(selected);
-        setEditorTabs([]);
-        setActiveTabName("");
-        setSelectedPaths({});
-        refreshWorkspaceFiles(selected);
-      }
-    } catch (err) {
-      alert("Failed to open folder dialog: " + err);
+      console.error("Failed to refresh files list: ", err);
     }
   };
 
   const handleOpenFile = async (fileName: string) => {
-    if (!workspacePath) return;
+    if (!workspacePath || !workspaceId) return;
 
-    // Check if the file is already open in a tab
     const alreadyOpen = editorTabs.some((t) => t.fileName === fileName);
     if (alreadyOpen) {
       setActiveTabName(fileName);
+      await invoke("sync_workspace_tabs", {
+        workspaceId,
+        activeTab: fileName,
+        tabs: editorTabs.map((t) => t.fileName),
+      });
       return;
     }
 
@@ -357,50 +479,67 @@ export default function App() {
         rootPath: workspacePath,
         fileName,
       });
-      setEditorTabs((prev) => [...prev, { fileName, content }]);
+      const newTabs = [...editorTabs, { fileName, content, isDirty: false }];
+      setEditorTabs(newTabs);
       setActiveTabName(fileName);
+
+      await invoke("sync_workspace_tabs", {
+        workspaceId,
+        activeTab: fileName,
+        tabs: newTabs.map((t) => t.fileName),
+      });
     } catch (err) {
       alert("Failed to open file: " + err);
     }
   };
 
-  const handleCloseTab = (fileName: string) => {
+  const handleCloseTab = async (fileName: string) => {
+    if (!workspaceId) return;
     const updatedTabs = editorTabs.filter((t) => t.fileName !== fileName);
     setEditorTabs(updatedTabs);
 
+    let nextActive = activeTabName;
     if (activeTabName === fileName) {
-      if (updatedTabs.length > 0) {
-        setActiveTabName(updatedTabs[updatedTabs.length - 1].fileName);
-      } else {
-        setActiveTabName("");
-      }
+      nextActive =
+        updatedTabs.length > 0
+          ? updatedTabs[updatedTabs.length - 1].fileName
+          : "";
+      setActiveTabName(nextActive);
     }
+
+    await invoke("sync_workspace_tabs", {
+      workspaceId,
+      activeTab: nextActive,
+      tabs: updatedTabs.map((t) => t.fileName),
+    });
   };
 
-  const handleSelectTab = (fileName: string) => {
+  const handleSelectTab = async (fileName: string) => {
+    if (!workspaceId) return;
     setActiveTabName(fileName);
+    await invoke("sync_workspace_tabs", {
+      workspaceId,
+      activeTab: fileName,
+      tabs: editorTabs.map((t) => t.fileName),
+    });
   };
 
-  // --- RECURSIVE CHECKBOX TOGGLE HANDLER ---
-  const handleToggleCheckbox = (
+  const handleToggleCheckbox = async (
     path: string,
     type: "file" | "directory",
     checked: boolean
   ) => {
+    if (!workspaceId) return;
     setSelectedPaths((prev) => {
       const next = { ...prev };
       next[path] = checked;
 
       if (type === "directory") {
         const prefix = `${path}/`;
-
-        // 1. Cascade checks down to all subfiles matching this directory prefix
         files.forEach((f) => {
           if (f === path || f.startsWith(prefix)) {
             next[f] = checked;
           }
-
-          // 2. Dynamically extract and cascade checks to subdirectories on-the-fly
           const parts = f.split("/");
           let current = "";
           for (let i = 0; i < parts.length - 1; i++) {
@@ -411,62 +550,235 @@ export default function App() {
           }
         });
       }
+
+      // Sync checkboxes list with SQLite
+      const checkedFiles = files.filter((f) => !!next[f]);
+      invoke("sync_workspace_selected_files", {
+        workspaceId,
+        selectedFiles: checkedFiles,
+      }).catch(console.error);
+
       return next;
     });
   };
 
-  // --- STREAMING PIPELINE TRIGGER ---
+  // --- LOCAL EDIT & SAVE TRIGGERS ---
+  const handleEditTabContent = (fileName: string, content: string) => {
+    setEditorTabs((prev) =>
+      prev.map((t) =>
+        t.fileName === fileName ? { ...t, content, isDirty: true } : t
+      )
+    );
+  };
+
+  const handleSaveTabContent = async (fileName: string) => {
+    const tab = editorTabs.find((t) => t.fileName === fileName);
+    if (!tab || !workspacePath) return;
+
+    try {
+      await invoke("write_workspace_file", {
+        rootPath: workspacePath,
+        fileName,
+        content: tab.content,
+      });
+
+      setEditorTabs((prev) =>
+        prev.map((t) =>
+          t.fileName === fileName ? { ...t, isDirty: false } : t
+        )
+      );
+
+      // Update historical stream content to context
+      await handleSendMessage(
+        `System Event: Local modifications saved directly to disk file [${fileName}]`,
+        "system"
+      );
+    } catch (err: any) {
+      alert("Failed to save changes: " + err);
+    }
+  };
+
+  // --- CONSOLE HISTORY SELECT CHECKBOX ---
+  const handleToggleMessageSelect = async (index: number, checked: boolean) => {
+    if (!workspaceId) return;
+    const targetMsg = messages[index];
+    setMessages((prev) => {
+      const copy = [...prev];
+      copy[index].isSelected = checked;
+      return copy;
+    });
+    try {
+      await invoke("update_message_selection", {
+        messageId: targetMsg.id,
+        isSelected: checked,
+      });
+    } catch (err) {}
+  };
+
+  // --- COMPILE THREE-TIER STREAM PAYLOADS ---
+  const compileStreamPayload = async (textToSend: string): Promise<string> => {
+    let finalPrompt = textToSend;
+
+    // 1. Files Context Compile
+    const selectedFilePaths = files.filter((f) => !!selectedPaths[f]);
+    let filesContext = "";
+    if (selectedFilePaths.length > 0) {
+      try {
+        filesContext = await invoke<string>("compile_selected_files_prompt", {
+          rootPath: workspacePath,
+          selectedFiles: selectedFilePaths,
+        });
+      } catch (err) {}
+    }
+
+    // 2. Chat Context Selection Compile (Standard dispatch compiles entire selected context)
+    const activeHistory = messages.filter((m) => m.isSelected !== false);
+    let historyContext = "";
+    if (activeHistory.length > 0) {
+      historyContext = "--- SELECTED CONVERSATION HISTORY ---\n";
+      activeHistory.forEach((h) => {
+        historyContext += `[${h.role}]: ${h.content}\n\n`;
+      });
+    }
+
+    // Assemble payload
+    if (filesContext || historyContext) {
+      finalPrompt = `${filesContext}\n${historyContext}\nUser Message: ${textToSend}`;
+    }
+
+    return finalPrompt;
+  };
+
+  // --- RERUN PROMPT COMPILER ENGINE (Targeted context construction) [1] ---
+  const compileRerunPayload = async (
+    userMsgIndex: number,
+    currentMsgContent: string
+  ): Promise<string> => {
+    // 1. Files Context Compile
+    const selectedFilePaths = files.filter((f) => !!selectedPaths[f]);
+    let filesContext = "";
+    if (selectedFilePaths.length > 0) {
+      try {
+        filesContext = await invoke<string>("compile_selected_files_prompt", {
+          rootPath: workspacePath,
+          selectedFiles: selectedFilePaths,
+        });
+      } catch (err) {}
+    }
+
+    // 2. Compile all selected messages occurring strictly BEFORE the rerun index (0 through index - 1)
+    const previousMessages = messages.slice(0, userMsgIndex);
+    const activeHistory = previousMessages.filter(
+      (m) => m.isSelected !== false
+    );
+    let historyContext = "";
+    if (activeHistory.length > 0) {
+      historyContext = "--- SELECTED CONVERSATION HISTORY ---\n";
+      activeHistory.forEach((h) => {
+        historyContext += `[${h.role}]: ${h.content}\n\n`;
+      });
+    }
+
+    // Assemble payload
+    let finalPrompt = currentMsgContent;
+    if (filesContext || historyContext) {
+      finalPrompt = `${filesContext}\n${historyContext}\nUser Message: ${currentMsgContent}`;
+    }
+
+    return finalPrompt;
+  };
+
   const handleSendMessage = async (
     customPrompt?: string,
     role: "user" | "system" = "user"
   ) => {
     const textToSend = customPrompt || prompt;
-    if (!textToSend.trim() || !selectedProvider) return;
+    if (!textToSend.trim() || !selectedProvider || !workspaceId) return;
 
-    setMessages((prev) => [...prev, { role, content: textToSend }]);
+    const userMsgId = `msg_u_${Date.now()}`;
+    const newUserMsg: ChatMessage = {
+      id: userMsgId,
+      role,
+      content: textToSend,
+      isSelected: role !== "system",
+    };
 
+    // Save user message to SQLite
+    await invoke("save_workspace_message", {
+      workspaceId,
+      messageId: userMsgId,
+      role,
+      content: textToSend,
+      isSelected: role !== "system",
+    });
+
+    let assistantMsgId = "";
+    let finalMessages = [...messages, newUserMsg];
+
+    if (role === "user") {
+      assistantMsgId = `msg_a_${Date.now()}`;
+      const emptyAssistantMsg: ChatMessage = {
+        id: assistantMsgId,
+        role: "assistant",
+        content: "",
+        isSelected: true,
+      };
+      finalMessages.push(emptyAssistantMsg);
+
+      // Save empty assistant message wrapper to SQLite
+      await invoke("save_workspace_message", {
+        workspaceId,
+        messageId: assistantMsgId,
+        role: "assistant",
+        content: "",
+        isSelected: true,
+      });
+    }
+
+    setMessages(finalMessages);
     if (!customPrompt) {
       setPrompt("");
     }
-
     setIsStreaming(true);
 
+    if (role === "user") {
+      setStreamingMessageId(assistantMsgId);
+    }
+
     try {
-      let finalPrompt = textToSend;
-
-      // OPTIMIZATION: Filter paths to compile only files checked by the user
-      const selectedFilePaths = files.filter((f) => !!selectedPaths[f]);
-
-      if (selectedFilePaths.length > 0 && !customPrompt) {
-        try {
-          const contextBlock = await invoke<string>(
-            "compile_selected_files_prompt",
-            {
-              rootPath: workspacePath,
-              selectedFiles: selectedFilePaths,
-            }
-          );
-          finalPrompt = `${contextBlock}\nUser Message: ${textToSend}`;
-        } catch (err) {
-          console.error("Failed to compile selected files context: ", err);
-        }
-      }
-
+      const compiledPayload = customPrompt
+        ? textToSend
+        : await compileStreamPayload(textToSend);
       await invoke("stream_chat", {
         providerId: selectedProvider,
-        prompt: finalPrompt,
+        prompt: compiledPayload,
       });
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `**Error starting connection:** ${err}` },
-      ]);
+      if (role === "user") {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMsgId
+              ? { ...msg, content: `**Error starting connection:** ${err}` }
+              : msg
+          )
+        );
+      } else {
+        const errId = `msg_err_${Date.now()}`;
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: errId,
+            role: "assistant",
+            content: `**Error starting connection:** ${err}`,
+          },
+        ]);
+      }
     } finally {
       setIsStreaming(false);
+      setStreamingMessageId(null);
     }
   };
 
-  // --- PREVIEW MODAL LOGIC ---
   const handleOpenPreviewModal = async () => {
     if (!selectedProvider) {
       alert("Please select an active provider first!");
@@ -476,27 +788,11 @@ export default function App() {
     const endpoint = provider ? provider.api_url : "Unknown Endpoint";
     const modelName = selectedModels[selectedProvider] || "Default fallback";
 
-    let finalPrompt = prompt;
-    const selectedFilePaths = files.filter((f) => !!selectedPaths[f]);
-
-    if (selectedFilePaths.length > 0) {
-      try {
-        const contextBlock = await invoke<string>(
-          "compile_selected_files_prompt",
-          {
-            rootPath: workspacePath,
-            selectedFiles: selectedFilePaths,
-          }
-        );
-        finalPrompt = `${contextBlock}\nUser Message: ${prompt}`;
-      } catch (err) {
-        console.error("Failed to compile preview context: ", err);
-      }
-    }
+    const compiledPayload = await compileStreamPayload(prompt);
 
     setPreviewEndpoint(endpoint);
     setPreviewModel(modelName);
-    setPreviewUserPrompt(finalPrompt);
+    setPreviewUserPrompt(compiledPayload);
     setIsPreviewModalOpen(true);
   };
 
@@ -506,9 +802,90 @@ export default function App() {
     await handleSendMessage(combinedPayload, "user");
   };
 
-  // --- SUPERVISED TERMINAL COMMAND INTERCEPTOR ---
+  // --- CONTEXTUAL IN-PLACE RERUN TRIGGER (Middle-of-array streaming execution) ---
+  const handleRerunMessage = async (index: number) => {
+    if (!selectedProvider || !workspaceId) return;
+    const targetUserMsg = messages[index];
+    if (targetUserMsg.role !== "user") return;
+
+    setIsStreaming(true);
+
+    // 1. Rebuild prompt using exactly: selected files + PREVIOUS messages (0 to index-1) + target user message content
+    const compiledPayload = await compileRerunPayload(
+      index,
+      targetUserMsg.content
+    );
+
+    let assistantMsgId = "";
+    const nextMsg = messages[index + 1];
+
+    if (nextMsg && nextMsg.role === "assistant") {
+      // Clean and re-use the adjacent assistant message block in place
+      assistantMsgId = nextMsg.id;
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMsgId ? { ...msg, content: "" } : msg
+        )
+      );
+      // Sync cleared wrapper inside SQLite
+      await invoke("save_workspace_message", {
+        workspaceId,
+        messageId: assistantMsgId,
+        role: "assistant",
+        content: "",
+        isSelected: nextMsg.isSelected !== false,
+      });
+    } else {
+      // Insert a fresh assistant block directly under the target user message
+      assistantMsgId = `msg_rerun_a_${Date.now()}`;
+      const newAssistantMsg: ChatMessage = {
+        id: assistantMsgId,
+        role: "assistant",
+        content: "",
+        isSelected: true,
+      };
+
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated.splice(index + 1, 0, newAssistantMsg);
+        return updated;
+      });
+
+      // Persist inside SQLite database
+      await invoke("save_workspace_message", {
+        workspaceId,
+        messageId: assistantMsgId,
+        role: "assistant",
+        content: "",
+        isSelected: true,
+      });
+    }
+
+    // Set streaming destination target
+    setStreamingMessageId(assistantMsgId);
+
+    try {
+      await invoke("stream_chat", {
+        providerId: selectedProvider,
+        prompt: compiledPayload,
+      });
+    } catch (err) {
+      // Render stream errors inside our active block
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMsgId
+            ? { ...msg, content: `**Error starting connection:** ${err}` }
+            : msg
+        )
+      );
+    } finally {
+      setIsStreaming(false);
+      setStreamingMessageId(null);
+    }
+  };
+
   const handleRunCommand = async (command: string) => {
-    if (!workspacePath) {
+    if (!workspacePath || !workspaceId) {
       alert("Please select a workspace folder first!");
       return;
     }
@@ -558,7 +935,6 @@ ${result.stderr || "(no stderr)"}`;
     }
   };
 
-  // --- SUPERVISED FILE WRITING INTERCEPTOR ---
   const handleWriteFile = async (fileName: string, content: string) => {
     if (!workspacePath) {
       alert("Please select a workspace folder first!");
@@ -575,9 +951,10 @@ ${result.stderr || "(no stderr)"}`;
       alert(result);
       await refreshWorkspaceFiles(workspacePath);
 
-      // Hot-reload CodeMirror and active tab state if edited file is open
       setEditorTabs((prev) =>
-        prev.map((t) => (t.fileName === fileName ? { ...t, content } : t))
+        prev.map((t) =>
+          t.fileName === fileName ? { ...t, content, isDirty: false } : t
+        )
       );
 
       handleSendMessage(
@@ -593,7 +970,6 @@ ${result.stderr || "(no stderr)"}`;
     }
   };
 
-  // --- SUPERVISED FILE PATCHING INTERCEPTOR ---
   const handlePatchFile = async (fileName: string, patchContent: string) => {
     if (!workspacePath) {
       alert("Please select a workspace folder first!");
@@ -610,13 +986,14 @@ ${result.stderr || "(no stderr)"}`;
       alert(result);
       await refreshWorkspaceFiles(workspacePath);
 
-      // Fetch newly patched content to hot-reload target editor tab
       const content = await invoke<string>("read_workspace_file", {
         rootPath: workspacePath,
         fileName,
       });
       setEditorTabs((prev) =>
-        prev.map((t) => (t.fileName === fileName ? { ...t, content } : t))
+        prev.map((t) =>
+          t.fileName === fileName ? { ...t, content, isDirty: false } : t
+        )
       );
 
       handleSendMessage(
@@ -632,7 +1009,18 @@ ${result.stderr || "(no stderr)"}`;
     }
   };
 
-  // --- CHAT INTERACTION HANDLERS ---
+  const handleClearMessages = async () => {
+    if (!workspaceId) return;
+    if (
+      !confirm("Clear this workspace's complete historical messaging thread?")
+    )
+      return;
+    try {
+      await invoke("clear_workspace_messages", { workspaceId });
+      setMessages([]);
+    } catch (err) {}
+  };
+
   const handleCopyMessage = async (content: string) => {
     try {
       await navigator.clipboard.writeText(content);
@@ -646,7 +1034,8 @@ ${result.stderr || "(no stderr)"}`;
     setEditingText(content);
   };
 
-  const handleSaveEdit = (index: number) => {
+  const handleSaveEdit = async (index: number) => {
+    const targetMsg = messages[index];
     setMessages((prev) => {
       const updated = [...prev];
       updated[index].content = editingText;
@@ -654,35 +1043,21 @@ ${result.stderr || "(no stderr)"}`;
     });
     setEditingIndex(null);
     setEditingText("");
+    try {
+      await invoke("update_workspace_message_content", {
+        messageId: targetMsg.id,
+        content: editingText,
+      });
+    } catch (err) {}
   };
 
-  const handleDeleteMessage = (index: number) => {
+  const handleDeleteMessage = async (index: number) => {
+    const targetMsg = messages[index];
     setMessages((prev) => prev.filter((_, i) => i !== index));
     if (editingIndex === index) setEditingIndex(null);
-  };
-
-  const handleRerunMessage = async (index: number) => {
-    if (!selectedProvider) return;
-    const targetMsg = messages[index];
-    if (targetMsg.role !== "user") return;
-
-    const truncated = messages.slice(0, index + 1);
-    setMessages(truncated);
-    setIsStreaming(true);
-
     try {
-      await invoke("stream_chat", {
-        providerId: selectedProvider,
-        prompt: targetMsg.content,
-      });
-    } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `**Error rerunning stream:** ${err}` },
-      ]);
-    } finally {
-      setIsStreaming(false);
-    }
+      await invoke("delete_workspace_message", { messageId: targetMsg.id });
+    } catch (err) {}
   };
 
   return (
@@ -692,57 +1067,96 @@ ${result.stderr || "(no stderr)"}`;
       <main className="flex-1 overflow-hidden flex flex-col">
         {activeTab === "chat" ? (
           <div className="flex-1 flex flex-col overflow-hidden">
-            <div className="flex-1 flex overflow-hidden min-h-0">
-              <WorkspaceSidebar
-                workspacePath={workspacePath}
-                files={files}
-                activeFileName={activeTabName}
-                selectedPaths={selectedPaths}
-                onToggleCheckbox={handleToggleCheckbox}
-                onSelectWorkspace={handleSelectWorkspace}
-                onOpenFile={handleOpenFile}
+            <div className="flex-1 flex overflow-hidden min-h-0 relative">
+              {/* Resizable Sidebar Node */}
+              <div
+                style={{ width: `${sidebarWidth}px` }}
+                className="h-full flex shrink-0"
+              >
+                <WorkspaceSidebar
+                  workspacePath={workspacePath}
+                  files={files}
+                  activeFileName={activeTabName}
+                  selectedPaths={selectedPaths}
+                  onToggleCheckbox={handleToggleCheckbox}
+                  onSelectWorkspace={handleSelectWorkspace}
+                  onOpenFile={handleOpenFile}
+                />
+              </div>
+
+              {/* Sidebar Drag Resizer Line */}
+              <div
+                onMouseDown={handleSidebarResize}
+                className="w-[3px] hover:w-[5px] bg-slate-800 hover:bg-indigo-500 cursor-col-resize transition-all shrink-0 z-20 h-full"
               />
 
-              <CodeViewer
-                tabs={editorTabs}
-                activeTabName={activeTabName}
-                onSelectTab={handleSelectTab}
-                onCloseTab={handleCloseTab}
+              {/* Code Canvas Tabbed Editor */}
+              <div className="flex-1 h-full min-w-0">
+                <CodeViewer
+                  tabs={editorTabs}
+                  activeTabName={activeTabName}
+                  onSelectTab={handleSelectTab}
+                  onCloseTab={handleCloseTab}
+                  onEditTabContent={handleEditTabContent}
+                  onSaveTabContent={handleSaveTabContent}
+                />
+              </div>
+
+              {/* Chat Panel Drag Resizer Line */}
+              <div
+                onMouseDown={handleChatResize}
+                className="w-[3px] hover:w-[5px] bg-slate-800 hover:bg-indigo-500 cursor-col-resize transition-all shrink-0 z-20 h-full"
               />
 
-              <ChatPanel
-                messages={messages}
-                selectedProvider={selectedProvider}
-                prompt={prompt}
-                setPrompt={setPrompt}
-                isStreaming={isStreaming}
-                isTerminalOpen={isTerminalOpen}
-                setIsTerminalOpen={setIsTerminalOpen}
-                onSendMessage={handleSendMessage}
-                // Forwarded Item Event Handlers
-                editingIndex={editingIndex}
-                editingText={editingText}
-                setEditingText={setEditingText}
-                runningCommand={runningCommand}
-                onCopy={handleCopyMessage}
-                onStartEdit={handleStartEdit}
-                onSaveEdit={handleSaveEdit}
-                onCancelEdit={() => setEditingIndex(null)}
-                onDelete={handleDeleteMessage}
-                onRerun={handleRerunMessage}
-                onRunCommand={handleRunCommand}
-                onWriteFile={handleWriteFile}
-                onPatchFile={handlePatchFile}
-                // Preview Event Handler
-                onOpenPreview={handleOpenPreviewModal}
-              />
+              {/* Resizable Chat Panel Node */}
+              <div
+                style={{ width: `${chatWidth}px` }}
+                className="h-full flex shrink-0"
+              >
+                <ChatPanel
+                  messages={messages}
+                  selectedProvider={selectedProvider}
+                  prompt={prompt}
+                  setPrompt={setPrompt}
+                  isStreaming={isStreaming}
+                  isTerminalOpen={isTerminalOpen}
+                  setIsTerminalOpen={setIsTerminalOpen}
+                  onSendMessage={handleSendMessage}
+                  onClearMessages={handleClearMessages}
+                  editingIndex={editingIndex}
+                  editingText={editingText}
+                  setEditingText={setEditingText}
+                  runningCommand={runningCommand}
+                  onCopy={handleCopyMessage}
+                  onStartEdit={handleStartEdit}
+                  onSaveEdit={handleSaveEdit}
+                  onCancelEdit={() => setEditingIndex(null)}
+                  onDelete={handleDeleteMessage}
+                  onRerun={handleRerunMessage} // Middle-of-array in-place rerun
+                  onRunCommand={handleRunCommand}
+                  onWriteFile={handleWriteFile}
+                  onPatchFile={handlePatchFile}
+                  onToggleMessageSelect={handleToggleMessageSelect} // Context Pruning
+                  onOpenPreview={handleOpenPreviewModal}
+                />
+              </div>
             </div>
+
+            {/* Terminal Resizer Header bar */}
+            {isTerminalOpen && (
+              <div
+                onMouseDown={handleTerminalResize}
+                className="h-[3px] hover:h-[5px] bg-slate-800 hover:bg-indigo-500 cursor-row-resize transition-all shrink-0 z-20"
+              />
+            )}
 
             <TerminalConsole
               terminalLogs={terminalLogs}
               isTerminalOpen={isTerminalOpen}
               setIsTerminalOpen={setIsTerminalOpen}
               onClearLogs={() => setTerminalLogs([])}
+              terminalEndRef={terminalEndRef}
+              terminalHeight={terminalHeight}
             />
           </div>
         ) : (
@@ -760,13 +1174,11 @@ ${result.stderr || "(no stderr)"}`;
             proxyBypassRules={proxyBypassRules}
             setProxyBypassRules={setProxyBypassRules}
             onSaveProxyRules={handleSaveProxyRules}
-            // Model Selection Props
             selectedModels={selectedModels}
             providerModels={providerModels}
             fetchingModels={fetchingModels}
             onFetchModels={handleFetchModels}
             onSelectModel={handleSelectModel}
-            // Global System Instructions Props
             systemInstruction={systemInstruction}
             setSystemInstruction={setSystemInstruction}
             onSaveSystemInstruction={handleSaveSystemInstruction}
@@ -777,7 +1189,6 @@ ${result.stderr || "(no stderr)"}`;
         )}
       </main>
 
-      {/* Expanded Prompt Preview Modal Overlay */}
       <PromptPreviewModal
         isOpen={isPreviewModalOpen}
         onClose={() => setIsPreviewModalOpen(false)}

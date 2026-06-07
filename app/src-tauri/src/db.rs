@@ -19,6 +19,33 @@ pub fn init_db(db_path: PathBuf) -> Result<Connection, String> {
             provider_type TEXT NOT NULL,
             api_url TEXT NOT NULL,
             is_enabled INTEGER DEFAULT 1
+         );
+         CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            root_path TEXT NOT NULL UNIQUE,
+            active_tab TEXT
+         );
+         CREATE TABLE IF NOT EXISTS workspace_tabs (
+            workspace_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, file_name),
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS workspace_selected_files (
+            workspace_id TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, file_name),
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+         );
+         CREATE TABLE IF NOT EXISTS workspace_messages (
+            id TEXT PRIMARY KEY NOT NULL,
+            workspace_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            is_selected INTEGER DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
          );"
     ).map_err(|e| e.to_string())?;
     

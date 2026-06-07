@@ -379,3 +379,192 @@ pub fn compile_selected_files_prompt(
 
     Ok(prompt_context)
 }
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct WorkspaceMsg {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub is_selected: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct WorkspaceState {
+    pub id: String,
+    pub root_path: String,
+    pub name: String,
+    pub active_tab: String,
+    pub tabs: Vec<String>,
+    pub selected_files: Vec<String>,
+    pub messages: Vec<WorkspaceMsg>,
+}
+
+#[tauri::command]
+pub fn load_or_create_workspace(
+    state: tauri::State<'_, crate::AppState>,
+    root_path: String,
+) -> Result<WorkspaceState, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    
+    // Find or create workspace row
+    let mut stmt = db.prepare("SELECT id, name, active_tab FROM workspaces WHERE root_path = ?1").map_err(|e| e.to_string())?;
+    let mut rows = stmt.query([&root_path]).map_err(|e| e.to_string())?;
+    
+    let (ws_id, ws_name, active_tab) = if let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        (
+            row.get::<_, String>(0).map_err(|e| e.to_string())?, 
+            row.get::<_, String>(1).map_err(|e| e.to_string())?, 
+            row.get::<_, Option<String>>(2).map_err(|e| e.to_string())?.unwrap_or_default()
+        )
+    } else {
+        // Generate a clean, fast timestamp-based workspace ID
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let new_id = format!("ws_{}", timestamp);
+        
+        let name = root_path.split('/').last().unwrap_or("unnamed_workspace").to_string();
+        db.execute(
+            "INSERT INTO workspaces (id, name, root_path, active_tab) VALUES (?1, ?2, ?3, '')",
+            [&new_id, &name, &root_path]
+        ).map_err(|e| e.to_string())?;
+        (new_id, name, "".to_string())
+    };
+
+    // Load tabs
+    let mut tab_stmt = db.prepare("SELECT file_name FROM workspace_tabs WHERE workspace_id = ?1").map_err(|e| e.to_string())?;
+    let tab_rows = tab_stmt.query_map([&ws_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let mut tabs = Vec::new();
+    for t in tab_rows { if let Ok(tab) = t { tabs.push(tab); } }
+
+    // Load selected files list
+    let mut sel_stmt = db.prepare("SELECT file_name FROM workspace_selected_files WHERE workspace_id = ?1").map_err(|e| e.to_string())?;
+    let sel_rows = sel_stmt.query_map([&ws_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let mut selected_files = Vec::new();
+    for s in sel_rows { if let Ok(sel) = s { selected_files.push(sel); } }
+
+    // Load messaging threads
+    let mut msg_stmt = db.prepare("SELECT id, role, content, is_selected FROM workspace_messages WHERE workspace_id = ?1 ORDER BY created_at ASC").map_err(|e| e.to_string())?;
+    let msg_rows = msg_stmt.query_map([&ws_id], |row| Ok(WorkspaceMsg {
+        id: row.get(0)?,
+        role: row.get(1)?,
+        content: row.get(2)?,
+        is_selected: row.get::<_, i32>(3)? == 1,
+    })).map_err(|e| e.to_string())?;
+    let mut messages = Vec::new();
+    for m in msg_rows { if let Ok(msg) = m { messages.push(msg); } }
+
+    Ok(WorkspaceState {
+        id: ws_id,
+        root_path,
+        name: ws_name,
+        active_tab,
+        tabs,
+        selected_files,
+        messages,
+    })
+}
+
+#[tauri::command]
+pub fn sync_workspace_tabs(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_id: String,
+    active_tab: String,
+    tabs: Vec<String>,
+) -> Result<(), String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    
+    tx.execute("UPDATE workspaces SET active_tab = ?1 WHERE id = ?2", [&active_tab, &workspace_id]).map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM workspace_tabs WHERE workspace_id = ?1", [&workspace_id]).map_err(|e| e.to_string())?;
+    
+    for tab in tabs {
+        tx.execute("INSERT INTO workspace_tabs (workspace_id, file_name) VALUES (?1, ?2)", [&workspace_id, &tab]).map_err(|e| e.to_string())?;
+    }
+    
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sync_workspace_selected_files(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_id: String,
+    selected_files: Vec<String>,
+) -> Result<(), String> {
+    let mut db = state.db.lock().map_err(|e| e.to_string())?;
+    let tx = db.transaction().map_err(|e| e.to_string())?;
+    
+    tx.execute("DELETE FROM workspace_selected_files WHERE workspace_id = ?1", [&workspace_id]).map_err(|e| e.to_string())?;
+    for file in selected_files {
+        tx.execute("INSERT INTO workspace_selected_files (workspace_id, file_name) VALUES (?1, ?2)", [&workspace_id, &file]).map_err(|e| e.to_string())?;
+    }
+    
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_workspace_message(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_id: String,
+    message_id: String,
+    role: String,
+    content: String,
+    is_selected: bool,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let is_sel_int = if is_selected { 1 } else { 0 };
+    db.execute(
+        "INSERT OR REPLACE INTO workspace_messages (id, workspace_id, role, content, is_selected) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![message_id, workspace_id, role, content, is_sel_int]
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_message_selection(
+    state: tauri::State<'_, crate::AppState>,
+    message_id: String,
+    is_selected: bool,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let is_sel_int = if is_selected { 1 } else { 0 };
+    db.execute(
+        "UPDATE workspace_messages SET is_selected = ?1 WHERE id = ?2",
+        rusqlite::params![is_sel_int, message_id]
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_workspace_messages(
+    state: tauri::State<'_, crate::AppState>,
+    workspace_id: String,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.execute("DELETE FROM workspace_messages WHERE workspace_id = ?1", [&workspace_id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_workspace_message(
+    state: tauri::State<'_, crate::AppState>,
+    message_id: String,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.execute("DELETE FROM workspace_messages WHERE id = ?1", [&message_id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_workspace_message_content(
+    state: tauri::State<'_, crate::AppState>,
+    message_id: String,
+    content: String,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.execute("UPDATE workspace_messages SET content = ?1 WHERE id = ?2", [&content, &message_id]).map_err(|e| e.to_string())?;
+    Ok(())
+}

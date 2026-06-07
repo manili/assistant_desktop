@@ -196,7 +196,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   };
 
   return (
-    <div className="w-64 border-r border-slate-800 bg-slate-900 flex flex-col shrink-0 overflow-hidden">
+    <div className="w-full border-r border-slate-800 bg-slate-900 flex flex-col shrink-0 overflow-hidden">
       <div className="p-4 border-b border-slate-800 shrink-0 flex flex-col">
         <button
           onClick={onSelectWorkspace}
