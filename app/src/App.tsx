@@ -1116,6 +1116,7 @@ ${result.stderr || "(no stderr)"}`;
                 <ChatPanel
                   messages={messages}
                   selectedProvider={selectedProvider}
+                  activeModel={selectedModels[selectedProvider]}
                   prompt={prompt}
                   setPrompt={setPrompt}
                   isStreaming={isStreaming}

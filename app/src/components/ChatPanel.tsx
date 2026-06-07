@@ -4,7 +4,7 @@ import { MessageItem } from "./MessageItem";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
-  selectedProvider: string;
+  activeModel?: string;
   prompt: string;
   setPrompt: (v: string) => void;
   isStreaming: boolean;
@@ -33,7 +33,7 @@ interface ChatPanelProps {
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
   messages,
-  selectedProvider,
+  activeModel,
   prompt,
   setPrompt,
   isStreaming,
@@ -67,7 +67,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     <div className="h-full flex flex-col bg-slate-900 overflow-hidden w-full">
       <div className="p-3 border-b border-slate-800 bg-slate-950 text-xs text-slate-400 text-center uppercase tracking-wider font-semibold flex justify-between items-center shrink-0 select-none">
         <div className="flex space-x-2">
-          <span>Engine: {selectedProvider || "None Selected"}</span>
+          <span>Engine: {activeModel || "None Selected"}</span>
           {messages.length > 0 && (
             <button
               onClick={onClearMessages}
