@@ -25,7 +25,7 @@ interface MessageItemProps {
   onToggleMessageSelect?: (index: number, checked: boolean) => void;
 }
 
-export const MessageItem: React.FC<MessageItemProps> = ({
+export const MessageItem = React.memo(function MessageItem({
   msg,
   index,
   editingIndex,
@@ -42,7 +42,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
   onWriteFile,
   onPatchFile,
   onToggleMessageSelect,
-}) => {
+}: MessageItemProps) {
   const isEditing = editingIndex === index;
   const isSelected = msg.isSelected !== false;
 
@@ -309,4 +309,4 @@ export const MessageItem: React.FC<MessageItemProps> = ({
       </div>
     </div>
   );
-};
+});

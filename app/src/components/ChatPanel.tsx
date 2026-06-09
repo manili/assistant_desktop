@@ -1,16 +1,14 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { ChatMessage } from "../types";
 import { MessageItem } from "./MessageItem";
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   activeModel?: string;
-  prompt: string;
-  setPrompt: (v: string) => void;
   isStreaming: boolean;
   isTerminalOpen: boolean;
   setIsTerminalOpen: (v: boolean) => void;
-  onSendMessage: () => void;
+  onSendMessage: (promptText: string) => void;
   onClearMessages: () => void;
 
   // Forwarded Item Event Handlers
@@ -28,14 +26,12 @@ interface ChatPanelProps {
   onWriteFile: (fileName: string, content: string) => void;
   onPatchFile: (fileName: string, content: string) => void;
   onToggleMessageSelect: (index: number, checked: boolean) => void;
-  onOpenPreview: () => void;
+  onOpenPreview: (promptText: string) => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
   messages,
   activeModel,
-  prompt,
-  setPrompt,
   isStreaming,
   isTerminalOpen,
   setIsTerminalOpen,
@@ -57,6 +53,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onToggleMessageSelect,
   onOpenPreview,
 }) => {
+  const [prompt, setPrompt] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -125,10 +122,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               // Intercept Cmd+Enter or Ctrl+Enter to open the debug modal
               if (e.metaKey || e.ctrlKey) {
                 e.preventDefault();
-                onOpenPreview();
+                onOpenPreview(prompt);
               } else if (!e.shiftKey) {
                 e.preventDefault();
-                onSendMessage();
+                if (prompt.trim()) {
+                  onSendMessage(prompt);
+                  setPrompt("");
+                }
               }
             }
           }}

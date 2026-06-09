@@ -21,7 +21,7 @@ interface FileNode {
   children: FileNode[];
 }
 
-export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
+export const WorkspaceSidebar = React.memo(function WorkspaceSidebar({
   workspacePath,
   files,
   activeFileName,
@@ -29,7 +29,7 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
   onOpenFile,
   selectedPaths,
   onToggleCheckbox,
-}) => {
+}: WorkspaceSidebarProps) {
   const [collapsedFolders, setCollapsedFolders] = useState<{
     [path: string]: boolean;
   }>({});
@@ -328,4 +328,4 @@ export const WorkspaceSidebar: React.FC<WorkspaceSidebarProps> = ({
       </div>
     </div>
   );
-};
+});

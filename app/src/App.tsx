@@ -86,7 +86,6 @@ export default function App() {
   }>({});
 
   // Chat State
-  const [prompt, setPrompt] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
 
@@ -689,10 +688,9 @@ export default function App() {
   };
 
   const handleSendMessage = async (
-    customPrompt?: string,
+    textToSend: string,
     role: "user" | "system" = "user"
   ) => {
-    const textToSend = customPrompt || prompt;
     if (!textToSend.trim() || !selectedProvider || !workspaceId) return;
 
     const userMsgId = `msg_u_${Date.now()}`;
@@ -736,9 +734,6 @@ export default function App() {
     }
 
     setMessages(finalMessages);
-    if (!customPrompt) {
-      setPrompt("");
-    }
     setIsStreaming(true);
 
     if (role === "user") {
@@ -746,7 +741,7 @@ export default function App() {
     }
 
     try {
-      const compiledPayload = customPrompt
+      const compiledPayload = role === "system"
         ? textToSend
         : await compileStreamPayload(textToSend);
       await invoke("stream_chat", {
@@ -779,7 +774,7 @@ export default function App() {
     }
   };
 
-  const handleOpenPreviewModal = async () => {
+  const handleOpenPreviewModal = async (currentPrompt: string) => {
     if (!selectedProvider) {
       alert("Please select an active provider first!");
       return;
@@ -788,7 +783,7 @@ export default function App() {
     const endpoint = provider ? provider.api_url : "Unknown Endpoint";
     const modelName = selectedModels[selectedProvider] || "Default fallback";
 
-    const compiledPayload = await compileStreamPayload(prompt);
+    const compiledPayload = await compileStreamPayload(currentPrompt);
 
     setPreviewEndpoint(endpoint);
     setPreviewModel(modelName);
@@ -798,7 +793,6 @@ export default function App() {
 
   const handleSendFromPreview = async (combinedPayload: string) => {
     setIsPreviewModalOpen(false);
-    setPrompt("");
     await handleSendMessage(combinedPayload, "user");
   };
 
@@ -1116,8 +1110,6 @@ ${result.stderr || "(no stderr)"}`;
                 <ChatPanel
                   messages={messages}
                   activeModel={selectedModels[selectedProvider]}
-                  prompt={prompt}
-                  setPrompt={setPrompt}
                   isStreaming={isStreaming}
                   isTerminalOpen={isTerminalOpen}
                   setIsTerminalOpen={setIsTerminalOpen}

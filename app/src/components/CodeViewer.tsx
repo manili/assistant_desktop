@@ -13,14 +13,14 @@ interface CodeViewerProps {
   onSaveTabContent: (fileName: string) => void;
 }
 
-export const CodeViewer: React.FC<CodeViewerProps> = ({
+export const CodeViewer = React.memo(function CodeViewer({
   tabs,
   activeTabName,
   onSelectTab,
   onCloseTab,
   onEditTabContent,
   onSaveTabContent,
-}) => {
+}: CodeViewerProps) {
   const activeTab = tabs.find((t) => t.fileName === activeTabName);
 
   // Monitor keys for Cmd+S or Ctrl+S within document context
@@ -125,4 +125,4 @@ export const CodeViewer: React.FC<CodeViewerProps> = ({
       )}
     </div>
   );
-};
+});
