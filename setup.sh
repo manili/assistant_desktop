@@ -21,7 +21,7 @@ fi
 echo "Setting up local development directories in: $PROJECT_DIR"
 
 # 3. Local Node.js Installation (Darwin x64 for Intel Mac)
-NODE_VER="v20.19.0"
+NODE_VER="v22.22.3"
 if [ ! -f "$NODE_DIR/bin/node" ]; then
   echo "Downloading portable Node.js $NODE_VER..."
   mkdir -p "$NODE_DIR"
@@ -40,8 +40,8 @@ fi
 
 # 5. Local PNPM Setup (Pinned to v9 for Big Sur compatibility)
 if [ ! -f "$NODE_DIR/bin/pnpm" ]; then
-  echo "Installing project-local PNPM (v9)..."
-  npm install -g pnpm@9 --prefix "$NODE_DIR"
+  echo "Installing project-local PNPM (v11)..."
+  npm install -g pnpm@latest-11 --prefix "$NODE_DIR"
 fi
 
 # 6. Generate the Portable activate.sh Script (Supports Bash and Zsh)
